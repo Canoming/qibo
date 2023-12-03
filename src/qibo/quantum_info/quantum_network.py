@@ -89,7 +89,7 @@ class QuantumNetwork:
             mat, np.einsum('ij -> ji',mat.conj()))
     
     @property
-    def is_psd(self) -> bool:
+    def is_sdp(self) -> bool:
         """
         Check if the Choi operator is positive semi-definite.
         """
@@ -115,9 +115,9 @@ class QuantumNetwork:
             traced, Iin)
 
     @property
-    def is_nonsignal(self) -> bool:
+    def is_causal(self) -> bool:
         """
-        Check if the Choi operator satisfies the non-signaling condition.
+        Check if the Choi operator satisfies the causal order condition.
         """
         if self.is_pure:
             self.full
@@ -132,12 +132,12 @@ class QuantumNetwork:
         """
         Check if the Choi operator is a channel.
         """
-        return self.is_psd and self.is_nonsignal
+        return self.is_sdp and self.is_causal
 
     @property
     def full(self) -> np.ndarray:
         if self.is_pure:
-            self.mat = np.einsum('ij,kl->ijkl', self.mat, self.mat.conj())
+            self.mat = np.einsum('ij,kl->jilk', self.mat, self.mat.conj())
             self._is_pure = False
             return self.mat
         else:
@@ -170,8 +170,36 @@ class QuantumNetwork:
             other_mat = other.mat
         if this_mat.shape != other_mat.shape:
             raise ValueError("The input Choi operators must have the same shape.")
+        if self.sys_out != other.sys_out:
+            raise ValueError("The input Choi operators must have the same output system.")
 
-        return QuantumNetwork(self.mat + other.mat, self.partition, False)
+        return QuantumNetwork(self.mat + other.mat, self.partition, self.sys_out)
+    
+    def __truediv__(self, other:Union[int,float]) -> 'QuantumNetwork':
+        """
+        Divide a Choi operator by a scalar.
+        """
+        if not isinstance(other, (int,float)):
+            raise TypeError("Input must be a scalar.")
+        if self.is_pure:
+            this_mat = self.full
+        else:
+            this_mat = self.mat
+
+        return QuantumNetwork(this_mat / other, self.partition, self.sys_out)
+    
+    def __mul__(self, other:Union[int,float]) -> 'QuantumNetwork':
+        """
+        Multiply a Choi operator by a scalar.
+        """
+        if not isinstance(other, (int,float)):
+            raise TypeError("Input must be a scalar.")
+        if self.is_pure:
+            this_mat = self.full
+        else:
+            this_mat = self.mat
+
+        return QuantumNetwork(this_mat * other, self.partition, self.sys_out)
     
     @staticmethod
     def _channle_expr(expr):
@@ -179,14 +207,9 @@ class QuantumNetwork:
             r'i\s*j\s*,\s*j\s*k\s*->\s*i\s*k',
             expr)
     @staticmethod
-    def _ch_measure_expr(expr):
+    def _inv_expr(expr):
         return re.match(
-            r'i\s*j\s*,\s*j\s*->\s*i',
-            expr)
-    @staticmethod
-    def _state_ch_expr(expr):
-        return re.match(
-            r'j\s*,\s*j\s*k\s*->\s*k',
+            r'i\s*j\s*,\s*k\s*i\s*->\s*k\s*j',
             expr)
 
     def link(self, other:'QuantumNetwork', expr:str=None) -> 'QuantumNetwork':
@@ -208,35 +231,20 @@ class QuantumNetwork:
         else:
             other_mat = other.mat
 
-        if expr is None:
-            print('No expr is given, assuming the input is a channel.')
-            cexpr = 'ijab,jkbc -> ikac'
-            return QuantumNetwork(
-                np.einsum(cexpr, this_mat, other_mat),
-                [self.partition[0],other.partition[1]])
-        elif self._channle_expr(expr) is not None:
+        if expr is None or self._channle_expr(expr) is not None:
             cexpr = 'ijab,jkbc->ikac'
             return QuantumNetwork(
                 np.einsum(cexpr, this_mat, other_mat),
                 [self.partition[0],other.partition[1]])
-        elif self._ch_measure_expr(expr) is not None:
-            cexpr = 'ijab,jb->ia'
+        elif self._inv_expr(expr) is not None:
+            cexpr = 'ijab,jkbc->ikac'
             return QuantumNetwork(
-                np.einsum(cexpr, this_mat, other_mat),
-                [self.partition[0]])
-        elif self._state_ch_expr(expr) is not None:
-            cexpr = 'jb,jkbc->kc'
-            return QuantumNetwork(
-                np.einsum(cexpr, this_mat, other_mat),
-                [other.partition[1]])
+                np.einsum(cexpr, other_mat, this_mat),
+                [other.partition[0],self.partition[1]])
     
     def __matmul__(self,B:'QuantumNetwork') -> 'QuantumNetwork':
         if len(self.partition) == 2 and len(B.partition) == 2:
             return self.link(B)
-        elif len(self.partition) == 1 and len(B.partition) == 2:
-            return self.link(B,'j,jk->k')
-        elif len(self.partition) == 2 and len(B.partition) == 1:
-            return self.link(B,'ij,j->i')
     
     def __str__(self) -> str:
         ind_in = [str(self.partition[i]) for i in range(len(self.partition)) if self.sys_out[i] is False]
@@ -261,43 +269,39 @@ if __name__ == "__main__":
         print(f'The `matrix` method of a channel should return the Choi matrix, but it prompts the error: {err}.')
 
     # The tensor structure of the Choi matrix
-    # For a quantum Channle, the Choi matrix is a 4-tensor:
-    #  1. The first two indices represents the input Hilbert space.
-    #  2. The last two indices represents the output Hilbert space.
+    # For a quantum Channle, the Choi matrix is a 4-tensor of the shape $(n,m,n,m)$, where $n$ is the dimension of the input system, and $m$ is the dimension of the output system.
     # In qubit systems, they are assuemed to be the same here.
     N = len(test_ch.target_qubits)
     # The repeatition of the indices is included in `ChoiOp`
     # We only specify the size of input and output here.
     partition = (2**N, 2**N)
     depolar_choi = QuantumNetwork(test_ch.to_choi(), partition)
-    print(depolar_choi)
     assert depolar_choi.mat.shape == (2,2,2,2)
     assert depolar_choi.dim == 4
     assert depolar_choi.partition == (2,2)
     assert depolar_choi.sys_out == (False, True)
 
-    assert depolar_choi.is_nonsignal
+    assert depolar_choi.is_causal
     assert depolar_choi.is_unital
     assert depolar_choi.is_hermitian
-    assert depolar_choi.is_psd
+    assert depolar_choi.is_sdp
 
     # Test state
     # state = np.array([[0.5,0.4],[0.4,0.5]])
     state = random_density_matrix(2)
-    state_choi = QuantumNetwork(state, (2,))
-    print(state_choi)
+    state_choi = QuantumNetwork(state, (1,2))
 
     assert state_choi.is_hermitian
-    assert state_choi.is_psd
+    assert state_choi.is_sdp
 
     state_out = test_ch.apply_density_matrix(backend, state, 1)
     # Test `apply`` method
     choi_op = depolar_choi.apply(state)
     assert np.allclose(choi_op, state_out)
     # Test `link` method
-    assert np.allclose(state_choi.link(depolar_choi,'j,jk->k').mat, state_out)
+    assert np.allclose(state_choi.link(depolar_choi).mat.flatten(), state_out.flatten())
     # Test the ``@`` operator on states
-    assert np.allclose((depolar_choi @ state_choi).mat, state_out)
+    assert np.allclose((state_choi @ depolar_choi).mat.flatten(), state_out.flatten())
 
     U = random_unitary(4)
     V = random_unitary(4)
@@ -305,12 +309,12 @@ if __name__ == "__main__":
     ChoiU = QuantumNetwork(U, (4,4), is_pure=True)
     ChoiV = QuantumNetwork(V, (4,4), is_pure=True)
 
-    ChoiUV = QuantumNetwork(U@V, (4,4), is_pure=True)
+    ChoiUV = QuantumNetwork(V@U, (4,4), is_pure=True)
 
     assert ChoiU.is_hermitian
-    assert ChoiU.is_nonsignal
+    assert ChoiU.is_causal
     assert ChoiU.is_unital
-    assert ChoiU.is_psd
+    assert ChoiU.is_sdp
 
     # Test `link` method for channels
     assert np.allclose(ChoiU.link(ChoiV).mat, ChoiUV.full)
