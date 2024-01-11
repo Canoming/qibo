@@ -1,4 +1,5 @@
 #%%
+import warnings
 import numpy as np
 import re
 
@@ -66,6 +67,11 @@ class QuantumNetwork:
                 # If there are two systems, we assume its a quantum channel.
                 # The output system is assumed to be the second one.
                 self.sys_out = (False,True)
+            if len(partition) == 4:
+                # If there are four systems, we assume its a super-channel.
+                # The inner two systems takes a channel as input.
+                # The outer two systems output a channel.
+                self.sys_out = (False,True,False,True)
         else:
             if len(sys_out) != len(partition):
                 raise ValueError("The length of `sys_out` must be the same as the length of `partition`.")
@@ -108,6 +114,10 @@ class QuantumNetwork:
         """
         if self.is_pure:
             self.full
+        
+        if len(self.partition) != 2:
+            warnings("The unitality condition is only defined for channels.")
+            return False
         
         Iin = np.eye(self.mat.shape[1])
         traced = np.einsum('ijil ->jl', self.mat)
@@ -207,12 +217,17 @@ class QuantumNetwork:
             r'i\s*j\s*,\s*j\s*k\s*->\s*i\s*k',
             expr)
     @staticmethod
+    def _super_expr(expr):
+        return re.match(
+            r'i\s*j\s*k\s*l\*,\s*j\s*k\s*->\s*i\s*l',
+            expr)
+    @staticmethod
     def _inv_expr(expr):
         return re.match(
             r'i\s*j\s*,\s*k\s*i\s*->\s*k\s*j',
             expr)
 
-    def link(self, other:'QuantumNetwork', expr:str=None) -> 'QuantumNetwork':
+    def link(self, other:'QuantumNetwork', subscript:str=None) -> 'QuantumNetwork':
         """
         The link product of two Choi operators.
         Note that the link product is not commutative.
@@ -231,19 +246,26 @@ class QuantumNetwork:
         else:
             other_mat = other.mat
 
-        if expr is None or self._channle_expr(expr) is not None:
+        if subscript is None or self._channle_expr(subscript) is not None:
             cexpr = 'ijab,jkbc->ikac'
             return QuantumNetwork(
                 np.einsum(cexpr, this_mat, other_mat),
                 [self.partition[0],other.partition[1]])
-        elif self._inv_expr(expr) is not None:
+        elif self._inv_expr(subscript) is not None:
             cexpr = 'ijab,jkbc->ikac'
             return QuantumNetwork(
                 np.einsum(cexpr, other_mat, this_mat),
                 [other.partition[0],self.partition[1]])
+        elif self._super_expr(subscript) is not None:
+            cexpr = 'ijklabcd,jkbc->ilad'
+            return QuantumNetwork(
+                np.einsum(cexpr, this_mat, other_mat),
+                [self.partition[0],self.partition[3]])
     
     def __matmul__(self,B:'QuantumNetwork') -> 'QuantumNetwork':
         if len(self.partition) == 2 and len(B.partition) == 2:
+            return self.link(B)
+        if len(self.partition) == 4 and len(B.partition) == 2:
             return self.link(B)
     
     def __str__(self) -> str:
